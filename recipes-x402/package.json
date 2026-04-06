@@ -1,0 +1,11 @@
+{
+  "name": "recipes-x402",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "start:server": "npm run dev -w paid-server",
+    "start:agent": "npm run agent -w mcp-agent --"
+  }
+}
