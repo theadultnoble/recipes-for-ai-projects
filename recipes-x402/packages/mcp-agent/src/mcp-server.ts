@@ -19,8 +19,9 @@ client.register("eip155:*", new ExactEvmScheme(signer));
 // If the server supports SIWX and the wallet has paid before,
 // access is granted without a new payment. Otherwise, it falls
 // back to the normal payment flow.
-const httpClient = new x402HTTPClient(client)
-  .onPaymentRequired(createSIWxClientHook(signer));
+const httpClient = new x402HTTPClient(client).onPaymentRequired(
+  createSIWxClientHook(signer),
+);
 
 // fetchWithPayment now handles SIWX auth + payment fallback automatically
 const fetchWithPayment = wrapFetchWithPayment(fetch, httpClient);

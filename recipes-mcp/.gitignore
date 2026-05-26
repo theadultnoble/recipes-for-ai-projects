@@ -1,0 +1,4 @@
+dist
+node_modules
+keypair.json
+.env
