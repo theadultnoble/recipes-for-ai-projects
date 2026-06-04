@@ -6,6 +6,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 import {
   createSolanaRpc,
   address,
@@ -26,6 +27,16 @@ import {
 import { getTransferSolInstruction } from "@solana-program/system";
 import { readFile } from "fs/promises";
 import path from "path";
+import fs from "fs";
+
+const feeSchedulePathRef = path.join(
+  process.cwd(),
+  "assets",
+  "fee-schedule.json",
+);
+const feeScheduleData = JSON.parse(
+  fs.readFileSync(feeSchedulePathRef, "utf-8"),
+);
 
 let solanaRpc: any;
 let solanaRpcSubscription: any;
@@ -49,6 +60,8 @@ const sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
   rpc: solanaRpc,
   rpcSubscriptions: solanaRpcSubscription,
 });
+
+// -------------------- Helper functions -------------------------
 
 function bigIntReplacer(_key: string, value: any): any {
   return typeof value === "bigint" ? value.toString() : value;
@@ -235,12 +248,86 @@ async function getAddressBalanceTool(add: string) {
   }
 }
 
-// Create a function to instantiate a new server for each session
+// ------- New MCP server, Resource, Tools for each session ---------
 const getServer = () => {
   const server = new McpServer({
     name: "Solana MCP",
     version: "1.0.0",
   });
+
+  // ---------- RESOURCE: Solana Fee Schedule ---------- //
+  server.registerResource(
+    "fee-Schedule",
+    "solana:fee-schedule",
+    {
+      description: "Current Solana fee schedule",
+      title: "Solana Fee Schedule",
+      mimeType: "application/json",
+    },
+    async (uri: any) => ({
+      contents: [
+        {
+          uri: uri.href,
+          text: JSON.stringify(feeScheduleData, null, 2),
+        },
+      ],
+    }),
+  );
+
+  // ----------- PROMPTS -------------------//
+
+  server.registerPrompt(
+    "estimate-transfer-cost",
+    {
+      title: "Estimate Transfer Cost",
+      description:
+        "Estimate the total cost of a Solana transfer by reading the current fee schedule",
+      argsSchema: {
+        amount: z.string().describe("Amount of SOL to transfer"),
+        priorityTier: completable(
+          z.enum(["low", "medium", "high"]).optional(),
+          (value) => {
+            const tiers: Array<"low" | "medium" | "high"> = [
+              "low",
+              "medium",
+              "high",
+            ];
+            return tiers.filter((t) => t.startsWith(value!.toLowerCase()));
+          },
+        ),
+      },
+    },
+    ({ amount, priorityTier }) => {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "resource",
+              resource: {
+                uri: "solana://fee-schedule",
+                mimeType: "application/json",
+                text: JSON.stringify(feeScheduleData, null, 2),
+              },
+            },
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Using the fee schedule above, calculate the total cost to transfer ${amount} SOL${
+                priorityTier
+                  ? ` with ${priorityTier} priority`
+                  : " at standard priority"
+              }. Show a clear breakdown of: amount, fee applied, and total cost. Do not execute any transfer.`,
+            },
+          },
+        ],
+      };
+    },
+  );
+
+  // ----------- TOOLS -------------------//
 
   server.registerTool(
     "get-latest-slot",
@@ -310,7 +397,7 @@ const getServer = () => {
               text: JSON.stringify(
                 {
                   lamportsBalance: lamportsBalance,
-                  solanaBalnce: solBalance,
+                  solanaBalance: solBalance,
                   usdBalance: usdBalance,
                 },
                 bigIntReplacer,
@@ -331,29 +418,86 @@ const getServer = () => {
   server.registerTool(
     "transfer",
     {
-      description: "Transfer SOL to a recipient address",
+      description: `Transfer SOL to a recipient address. 
+    On first call: provide "to", "amount" and  and "priorityTier" if the user specified one (low, medium, high) only. The tool MUST read the solana://fee-schedule resource and return a confirmation prompt with estimated costs(amount + priorityFee).
+    On second call: provide "to", "amount", "confirmed: true", "confirmationId" from the first call, and "priorityTier" if the user specified one (low, medium, high)`,
       inputSchema: {
         to: z.string(),
         amount: z.number(),
+        confirmed: z.boolean().optional(),
+        confirmationId: z.string().optional(),
+        priorityTier: z.enum(["low", "medium", "high"]).optional(),
       } as any,
     },
     async (args: any) => {
-      try {
-        const transaction = await transferTool(args);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(transaction, bigIntReplacer, 2),
-            },
-          ],
-        };
-      } catch (error: any) {
-        return {
-          content: [{ type: "text" as const, text: error?.message }],
-          isError: true,
-        };
+      const { to, amount, confirmed, confirmationId, priorityTier } = args;
+
+      if (confirmed && confirmationId) {
+        let decodedData;
+
+        try {
+          // Decode the confirmation ID to get the original transfer data
+          decodedData = JSON.parse(
+            Buffer.from(confirmationId, "base64").toString("utf-8"),
+          );
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: Invalid confirmation ID. Please initiate a new transfer.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        try {
+          const transaction = await transferTool({
+            to: decodedData.to,
+            amount: decodedData.amount,
+          });
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(transaction, bigIntReplacer, 2),
+              },
+            ],
+          };
+        } catch (error: any) {
+          return {
+            content: [{ type: "text" as const, text: error?.message }],
+            isError: true,
+          };
+        }
       }
+
+      let priorityFee = 0;
+      if (priorityTier) {
+        const tier = feeScheduleData.priorityFeeTiers[priorityTier];
+        priorityFee = tier.estimatedCost;
+      }
+
+      const totalCost = amount + priorityFee;
+
+      // Encode the transfer details in a confirmation ID
+      const transferData = { to, amount, priorityTier };
+      const newConfirmationId = Buffer.from(
+        JSON.stringify(transferData),
+      ).toString("base64");
+
+      const tierInfo = priorityTier
+        ? `Priority: ${priorityTier.toUpperCase()}\n`
+        : `Priority: Standard\n`;
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Transfer Confirmation Required\n\nAmount: ${amount} SOL\nRecipient: ${to}\n${tierInfo}Fee: ${priorityFee} SOL\nTotal Cost: ${totalCost} SOL\n\nConfirmation ID: ${newConfirmationId}\n\nTo proceed, confirm this transfer.`,
+          },
+        ],
+      };
     },
   );
 
@@ -372,7 +516,7 @@ const validateOrigin = (req: Request): boolean => {
   if (origin) {
     try {
       const url = new URL(origin);
-      return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+      return url.hostname === "localhost" || url.hostname === "0.0.0.0";
     } catch {
       return false;
     }
@@ -386,17 +530,17 @@ app.post("/mcp", async (req: Request, res: Response) => {
 
   try {
     // Security: Validate Origin header
-    if (!validateOrigin(req)) {
-      res.status(403).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32000,
-          message: "Forbidden: Invalid Origin",
-        },
-        id: null,
-      });
-      return;
-    }
+    // if (!validateOrigin(req)) {
+    //   res.status(403).json({
+    //     jsonrpc: "2.0",
+    //     error: {
+    //       code: -32000,
+    //       message: "Forbidden: Invalid Origin",
+    //     },
+    //     id: null,
+    //   });
+    //   return;
+    // }
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     const isInitRequest = req.body.method === "initialize";
@@ -490,10 +634,9 @@ async function main() {
     await verifyKeypairFile();
 
     const port = parseInt(process.env.PORT || "3000", 10);
-    const host = "127.0.0.1";
+    const host = "0.0.0.0";
 
     app.listen(port, host, () => {
-      console.log(`Solana MCP Server listening on http://${host}:${port}/mcp`);
       console.error(
         `Solana MCP Server listening on http://${host}:${port}/mcp`,
       );

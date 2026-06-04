@@ -1,0 +1,26 @@
+{
+  "baseFee": 2000,
+  "priorityFeeTiers": {
+    "low": {
+      "lamportsPerSignature": 1000,
+      "description": "~1-5 second confirmation",
+      "estimatedCost": 0.00001
+    },
+    "medium": {
+      "lamportsPerSignature": 3000,
+      "description": "~2-3 second confirmation",
+      "estimatedCost": 0.00005
+    },
+    "high": {
+      "lamportsPerSignature": 10000,
+      "description": "~1-2 second confirmation",
+      "estimatedCost": 0.0001
+    }
+  },
+  "estimatedCosts": {
+    "simpleTransfer": 0.00025,
+    "tokenTransfer": 0.0005,
+    "complexTx": 0.001
+  },
+  "lastUpdated": "2025-06-01T12:00:00Z"
+}
