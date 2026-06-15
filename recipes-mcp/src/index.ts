@@ -258,20 +258,23 @@ const getServer = () => {
   // ---------- RESOURCE: Solana Fee Schedule ---------- //
   server.registerResource(
     "fee-Schedule",
-    "solana:fee-schedule",
+    "solana://fee-schedule",
     {
       description: "Current Solana fee schedule",
       title: "Solana Fee Schedule",
       mimeType: "application/json",
     },
-    async (uri: any) => ({
-      contents: [
-        {
-          uri: uri.href,
-          text: JSON.stringify(feeScheduleData, null, 2),
-        },
-      ],
-    }),
+    async (uri: any) => {
+      console.error("Fee schedule resource read");
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            text: JSON.stringify(feeScheduleData, null, 2),
+          },
+        ],
+      };
+    },
   );
 
   // ----------- PROMPTS -------------------//
